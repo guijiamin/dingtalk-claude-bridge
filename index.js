@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 const APP_KEY = process.env.DINGTALK_APP_KEY;
 const APP_SECRET = process.env.DINGTALK_APP_SECRET;
-const WORK_DIR = process.env.WORK_DIR || process.cwd();
+const WORK_DIR = process.env.WORK_DIR || require('os').homedir();
 const ALLOW_FROM = process.env.ALLOW_FROM ? process.env.ALLOW_FROM.split(',').map(s => s.trim()) : null;
 const ADMIN_FROM = process.env.ADMIN_FROM ? process.env.ADMIN_FROM.split(',').map(s => s.trim()) : null;
 
@@ -464,6 +464,7 @@ async function handleDingTalkMessage(msg) {
     const senderNick = data.senderNick || 'User';
     const msgType = data.msgtype || data.msgType;
     const sessionWebhook = data.sessionWebhook;
+    const msgId = data.msgId;
     
     let text = '';
     if (msgType === 'text') {
@@ -517,13 +518,16 @@ async function handleDingTalkMessage(msg) {
     const fullResponse = await getClaudeResponse(session.messages, session.workDir);
     console.log(`[Claude] Response:`, fullResponse.substring(0, 100) + '...');
 
-    session.messages.push({ role: 'assistant', content: fullResponse });
+    const responseText = fullResponse.trim() || '(no content)';
+
+    session.messages.push({ role: 'assistant', content: responseText });
     session.updatedAt = new Date().toISOString();
     await saveSession(session.id, session);
 
-    // 发送回复
+    // 发送最终回复，包含引用效果
     if (sessionWebhook) {
-      await replyToDingTalk(sessionWebhook, fullResponse.substring(0, 2000));
+      const finalMsg = `> ${senderNick}: ${text}\n\n${responseText.substring(0, 2000)}`;
+      await replyToDingTalk(sessionWebhook, finalMsg, null, true);
     }
 
   } catch (error) {
@@ -533,7 +537,39 @@ async function handleDingTalkMessage(msg) {
 
 // ==================== Reply ====================
 
-async function replyToDingTalk(sessionWebhook, message) {
+function getSmartEmoji(text) {
+  const lowerText = text.toLowerCase().trim();
+  
+  // 问候类
+  if (/^(你好|hi|hello|hey|早上好|晚上好|下午好|早上好呀|哈喽)/.test(lowerText)) {
+    return '👋';
+  }
+  
+  // 感谢类
+  if (/^(谢谢|感谢|thanks|thank you|thx)/.test(lowerText)) {
+    return '😊';
+  }
+  
+  // 问题类
+  if (/(为什么|怎么|如何|什么|哪里|谁|多少|吗|呢|？|\?)/.test(lowerText)) {
+    return '🤔';
+  }
+  
+  // 命令类
+  if (/^\/(new|list|switch|dir|status|ws|help)/.test(lowerText)) {
+    return '⚙️';
+  }
+  
+  // 代码类
+  if (/(代码|code|function|class|def|import|write|写个|帮我写)/.test(lowerText)) {
+    return '💻';
+  }
+  
+  // 默认
+  return '👍';
+}
+
+async function replyToDingTalk(sessionWebhook, message, msgId = null, isMarkdown = false) {
   try {
     if (!sessionWebhook) {
       console.error('[DingTalk] No session webhook available, cannot send reply');
@@ -541,12 +577,14 @@ async function replyToDingTalk(sessionWebhook, message) {
     }
 
     console.log('[DingTalk] Sending reply via session webhook');
+    
+    const payload = isMarkdown 
+      ? { msgtype: 'markdown', markdown: { title: '回复', text: message } }
+      : { msgtype: 'text', text: { content: message } };
+
     await axios.post(
       sessionWebhook,
-      {
-        msgtype: 'text',
-        text: { content: message }
-      },
+      payload,
       {
         headers: { 'Content-Type': 'application/json' }
       }
